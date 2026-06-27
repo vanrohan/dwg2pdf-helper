@@ -397,6 +397,22 @@ def test_lost_color_px_detects_flattened_image():
     assert dwfx._lost_color_px(red, small) == 100   # size mismatch -> total loss
 
 
+def test_lost_color_px_detects_dropped_grey_fill():
+    # The real failure on 46738B/46313B: a grey/dark SHADED fill (an isometric view the
+    # vector device drops to a hollow white outline). The dropped fill carries no colour,
+    # so a colour-only check scores 0 and the broken vector PDF is kept. Lost monochrome
+    # content - solid in the true render, blank in the vector render - must count too.
+    def solid(rgb):
+        pm = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 10, 10), False)
+        pm.set_rect(pm.irect, rgb)
+        return pm
+    grey, dark, white = solid((128, 128, 128)), solid((40, 40, 40)), solid((255, 255, 255))
+    assert dwfx._lost_color_px(grey, white) == 100   # mid-grey fill -> blank: lost
+    assert dwfx._lost_color_px(dark, white) == 100   # dark fill -> blank: lost
+    assert dwfx._lost_color_px(grey, grey) == 0      # fill preserved -> kept
+    assert dwfx._lost_color_px(white, white) == 0    # blank paper, nothing to lose
+
+
 def test_vector_lost_color_true_when_vector_dropped_image(tmp_path):
     # Simulate the real failure in CI: true render (image doc) has the red square,
     # vector render (built from a no-image doc) does not -> colour lost -> raster.
@@ -555,16 +571,29 @@ def test_real_image_drawing_routes_to_raster_and_renders(tmp_path):
 
 
 @pytest.mark.skipif(
-    not (SAMPLES / "46313B.dwg.dwfx").exists(),
-    reason="confidential real sample not present (gitignored)",
+    not all((SAMPLES / f).exists() for f in ("46313B.dwg.dwfx", "46738B.dwg.dwfx")),
+    reason="confidential real samples not present (gitignored)",
 )
-def test_real_lineart_with_benign_image_stays_vector(tmp_path):
-    # This drawing carries an ImageSource the vector device handles fine; it must NOT be
-    # downgraded to raster. Selectable text + a tiny file prove the vector path was kept.
-    out = tmp_path / "46313B.pdf"
-    dwfx.xps_to_pdf(SAMPLES / "46313B.dwg.dwfx", out)
-    assert fitz.open(out)[0].get_text("text").strip() != ""  # raster pages have no text
-    assert out.stat().st_size < 1_000_000                    # vector PDF is ~0.1 MB
+@pytest.mark.parametrize(
+    "name, shaded_xy",
+    [
+        ("46738B.dwg.dwfx", (0.12, 0.55)),  # shaded isometric channel, bottom-left
+        ("46313B.dwg.dwfx", (0.80, 0.18)),  # shaded isometric bracket, top-right
+    ],
+)
+def test_real_shaded_view_drawing_routes_to_raster(tmp_path, name, shaded_xy):
+    # These drawings paint a SHADED isometric view as a tiled-pattern/ImageBrush fill that
+    # the vector device drops to a hollow white outline. The drop carries no colour, so the
+    # old colour-only check missed it and shipped a vector PDF with the 3D view blanked out.
+    # The render-and-compare routing must now pick raster, and the shaded fill must survive.
+    out = tmp_path / f"{name}.pdf"
+    dwfx.xps_to_pdf(SAMPLES / name, out)
+    page = fitz.open(out)[0]
+    assert page.get_text("text").strip() == ""  # raster route taken (vector keeps text)
+    pix = page.get_pixmap(dpi=72)
+    x, y = int(pix.width * shaded_xy[0]), int(pix.height * shaded_xy[1])
+    r, g, b = pix.pixel(x, y)
+    assert max(r, g, b) < 200  # shaded fill reproduced, not dropped to white paper
 
 
 def test_run_batch_image_and_assembly_tag_compose(tmp_path):

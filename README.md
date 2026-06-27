@@ -30,8 +30,9 @@ order, e.g. `frame_assy_weld.pdf`. Only XPS DWFx are scanned - binary DWF6 files
 **Embedded images.** Most drawings are pure vector and convert to a crisp, small
 PDF. Some embed a raster image (inserted photo, shaded/rendered view or scanned
 underlay) that the vector converter silently drops to a black box. Each drawing
-is converted as vector first, then checked: if the vector PDF lost colour the
-real page has, that file is re-rendered page-by-page so the image is reproduced
+is converted as vector first, then checked: if the vector PDF lost content the
+real page has (dropped colour, or a shaded/tiled-pattern view blanked to a hollow
+outline), that file is re-rendered page-by-page so the image is reproduced
 (larger and not text-selectable, but correct; a 200 dpi A3 sheet is ~1-2 MB,
 lossless). Drawings the vector path handles cleanly - including ones with images
 it renders fine - keep the crisp, tiny vector output. A drawing that cannot be

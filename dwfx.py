@@ -213,25 +213,36 @@ def _convert_raster(doc, dpi: int) -> tuple[int, bytes]:
 
 
 def _lost_color_px(true_pix, vec_pix) -> int:
-    """Count pixels that are clearly coloured in the true render but greyscale in the
-    vector render - i.e. an image the vector device flattened to black/grey/white.
-    A size mismatch is treated as total loss (forces the raster path)."""
+    """Count pixels where the vector render dropped content the true render has. Two ways
+    the vector pdf-write device loses an embedded image or shaded view:
+
+      * colour flattened - clearly coloured in the true render, greyscale in the vector
+        render (a photo black-boxed to grey/black/white), or
+      * fill dropped - solid/shaded in the true render, blank white paper in the vector
+        render (a tiled-pattern/ImageBrush isometric view reduced to a hollow outline).
+
+    The second case carries no colour, so a colour-only check misses the grey/dark
+    shaded views in many AutoCAD drawings. A size mismatch is total loss (forces raster)."""
     if (true_pix.width, true_pix.height) != (vec_pix.width, vec_pix.height):
         return true_pix.width * true_pix.height
     t, v, n = true_pix.samples, vec_pix.samples, true_pix.n
     lost = 0
     for i in range(0, len(t), n):
-        if max(t[i], t[i + 1], t[i + 2]) - min(t[i], t[i + 1], t[i + 2]) > 40:
-            if max(v[i], v[i + 1], v[i + 2]) - min(v[i], v[i + 1], v[i + 2]) < 25:
-                lost += 1
+        t_lo, t_hi = min(t[i], t[i + 1], t[i + 2]), max(t[i], t[i + 1], t[i + 2])
+        v_lo, v_hi = min(v[i], v[i + 1], v[i + 2]), max(v[i], v[i + 1], v[i + 2])
+        if t_hi - t_lo > 40 and v_hi - v_lo < 25:      # colour -> greyscale
+            lost += 1
+        elif t_lo < 200 and v_lo > 235:                # solid/shaded fill -> blank paper
+            lost += 1
     return lost
 
 
 def _vector_lost_color(doc, vec_pdf_bytes: bytes, check_dpi: int = 50) -> bool:
-    """True if the vector PDF lost colour content the page actually has - the reliable
-    signal that convert_to_pdf dropped an embedded image. Compares each page's true
-    raster render against the vector render at a coarse dpi; >0.2% of a page lost is
-    enough (benign images that the vector device handles score ~0)."""
+    """True if the vector PDF dropped content the page actually has - the reliable signal
+    that convert_to_pdf lost an embedded image or a shaded (tiled-pattern) view. Compares
+    each page's true raster render against the vector render at a coarse dpi; >0.2% of a
+    page lost (colour flattened OR solid fill blanked) is enough (benign images the vector
+    device handles score ~0)."""
     vec = fitz.open("pdf", vec_pdf_bytes)
     try:
         for i in range(doc.page_count):
