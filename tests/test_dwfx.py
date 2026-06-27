@@ -4,7 +4,6 @@ from pathlib import Path
 import fitz
 import pytest
 
-import autocad_dwf
 import dwfx
 from conftest import make_fake_binary_dwf, make_min_xps, make_multi_xps
 
@@ -132,32 +131,6 @@ def test_run_batch_rejects_output_inside_input(tmp_path):
     in_dir.mkdir()
     with pytest.raises(ValueError):
         dwfx.run_batch(in_dir, in_dir / "sub")
-
-
-# --- autocad driver helpers (no AutoCAD needed) ---
-
-def test_find_acad_none_when_absent(tmp_path):
-    assert autocad_dwf.find_acad(search_bases=(str(tmp_path),)) is None
-
-
-def test_build_script_contains_each_file_and_plot(tmp_path):
-    jobs = [(Path(r"C:\in\a.dwfx"), Path(r"C:\out\a.pdf")),
-            (Path(r"C:\in\b.dwfx"), Path(r"C:\out\b.pdf"))]
-    cfg = autocad_dwf.AutoCadConfig(clawpdf_output_dir=tmp_path)
-    scr = autocad_dwf.build_script(jobs, cfg, tmp_path)
-    assert "-DWFATTACH" in scr
-    assert r"C:\in\a.dwfx" in scr and r"C:\in\b.dwfx" in scr
-    assert scr.count("-PLOT") == 2
-    assert "clawPDF" in scr
-    assert scr.strip().endswith("Y")  # QUIT confirmation
-
-
-def test_convert_batch_noop_off_windows(tmp_path):
-    # On non-Windows this must not launch anything and must report all-False.
-    jobs = [(tmp_path / "a.dwfx", tmp_path / "a.pdf")]
-    logs = []
-    res = autocad_dwf.convert_batch(jobs, config=autocad_dwf.AutoCadConfig(), log=logs.append)
-    assert res == {tmp_path / "a.dwfx": False}
 
 
 # --- additional real-world scenarios (from test review) ---

@@ -159,7 +159,6 @@ def run_batch(
                 tee(f"[FAIL] {rel}: unrecognized package (not XPS DWFx or binary DWF)")
 
         if binary_jobs:
-            tee(f"[dwf]  {len(binary_jobs)} binary DWF file(s) need AutoCAD + clawPDF.")
             if _autocad_batch is not None:
                 outcomes = _autocad_batch(
                     [(s, t) for s, t, _ in binary_jobs],
@@ -177,17 +176,14 @@ def run_batch(
             else:
                 report = output_dir / BINARY_REPORT_FILENAME
                 with open(report, "w", encoding="utf-8") as fh:
-                    fh.write(
-                        "These files are binary DWF (not XPS DWFx) and require the\n"
-                        "AutoCAD + clawPDF workflow (see README). They were NOT converted:\n\n"
-                    )
+                    fh.write("Binary DWF files - convert manually:\n\n")
                     for _, _, rel in binary_jobs:
                         fh.write(rel + "\n")
                 result.binary_pending += len(binary_jobs)
-                tee(
-                    f"[dwf]  AutoCAD not available here - listed {len(binary_jobs)} "
-                    f"binary file(s) in {report.name}."
-                )
+                tee("")
+                tee(f"[manual] {len(binary_jobs)} binary DWF - convert manually (see {report.name}):")
+                for _, _, rel in binary_jobs:
+                    tee(f"    - {rel}")
 
         tee(
             f"\nDone. {result.ok} converted, {result.skipped} skipped, "

@@ -9,7 +9,6 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-import autocad_dwf
 import dwfx
 
 
@@ -34,19 +33,7 @@ class App(tk.Tk):
         self.out_var = tk.StringVar()
         ttk.Entry(top, textvariable=self.out_var).grid(row=1, column=1, sticky="we", padx=4)
         ttk.Button(top, text="Browse...", command=self._pick_out).grid(row=1, column=2)
-        ttk.Label(top, text="clawPDF output folder:").grid(row=2, column=0, sticky="w", pady=4)
-        self.claw_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.claw_var).grid(row=2, column=1, sticky="we", padx=4)
-        ttk.Button(top, text="Browse...", command=self._pick_claw).grid(row=2, column=2)
         top.columnconfigure(1, weight=1)
-
-        hint = ttk.Label(
-            self,
-            text=("XPS-based DWFx convert directly. Binary DWF6 files need full AutoCAD + clawPDF: "
-                  "set the clawPDF auto-save folder above (Windows only) or they are listed for manual conversion."),
-            foreground="#555", wraplength=720, justify="left",
-        )
-        hint.pack(fill="x", padx=8)
 
         opt = ttk.Frame(self)
         opt.pack(fill="x", padx=8, pady=4)
@@ -69,11 +56,6 @@ class App(tk.Tk):
         d = filedialog.askdirectory(title="Select output folder")
         if d:
             self.out_var.set(d)
-
-    def _pick_claw(self) -> None:
-        d = filedialog.askdirectory(title="Select clawPDF auto-save folder")
-        if d:
-            self.claw_var.set(d)
 
     def _append(self, msg: str) -> None:
         self.log_widget.configure(state="normal")
@@ -105,35 +87,26 @@ class App(tk.Tk):
         if not out:
             self._append("[error] Please choose an output folder.")
             return
-        claw = self.claw_var.get().strip()
         skip = self.skip_var.get()
         self.run_btn.configure(state="disabled")
         self.status.configure(text="Working...")
         self._append(f"Input:  {inp}")
         self._append(f"Output: {out}")
         self._worker = threading.Thread(
-            target=self._work, args=(inp, out, claw, skip), daemon=True
+            target=self._work, args=(inp, out, skip), daemon=True
         )
         self._worker.start()
 
-    def _work(self, inp: str, out: str, claw: str, skip: bool) -> None:
+    def _work(self, inp: str, out: str, skip: bool) -> None:
         def log(m: str) -> None:
             self._q.put(("log", m))
 
-        autocad_batch = None
-        config = None
-        if claw and sys.platform == "win32":
-            config = autocad_dwf.AutoCadConfig(clawpdf_output_dir=Path(claw))
-            autocad_batch = autocad_dwf.convert_batch
         try:
-            res = dwfx.run_batch(
-                Path(inp), Path(out), skip_existing=skip, log=log,
-                autocad_config=config, _autocad_batch=autocad_batch,
-            )
+            res = dwfx.run_batch(Path(inp), Path(out), skip_existing=skip, log=log)
             self._q.put((
                 "done",
                 f"Done. {res.ok} converted, {res.skipped} skipped, "
-                f"{res.failed} failed, {res.binary_pending} binary pending.",
+                f"{res.failed} failed, {res.binary_pending} need manual conversion.",
             ))
         except ValueError as e:
             self._q.put(("log", f"[error] {e}"))
