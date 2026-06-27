@@ -1,0 +1,20 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.manifest
+
+# App runtime logs
+dwg2pdf.log
+dwg2pdf-crash.log
+
+# OS
+.DS_Store
+Thumbs.db
