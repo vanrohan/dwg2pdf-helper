@@ -1,0 +1,47 @@
+name: build-exe
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pytest
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Build one-file exe
+        run: >
+          pyinstaller --onefile --windowed --name DWG2PDF
+          --collect-all ezdxf
+          --collect-all fontTools
+          --collect-all pymupdf
+          --collect-all PIL
+          app.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DWG2PDF-exe
+          path: dist/DWG2PDF.exe
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/DWG2PDF.exe
