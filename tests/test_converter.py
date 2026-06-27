@@ -344,3 +344,104 @@ def test_run_batch_rejects_output_equals_input(tmp_path):
     in_dir.mkdir()
     with pytest.raises(ValueError):
         converter.run_batch(in_dir, in_dir)
+
+
+def test_run_batch_same_stem_different_folders_both_render(tmp_path):
+    in_dir = tmp_path / "in"
+    (in_dir / "A").mkdir(parents=True)
+    (in_dir / "B").mkdir(parents=True)
+    (in_dir / "A" / "x.dwg").write_text("x")   # -> out/A/x.pdf
+    make_dxf(in_dir / "B" / "x.dxf")           # -> out/B/x.pdf (different folder, no shadow)
+    out_dir = tmp_path / "out"
+    logs = []
+
+    def fake_oda(input_dir, temp_dir, oda_exe, **k):
+        _seed_temp_dxf(input_dir, temp_dir)
+
+    res = converter.run_batch(
+        in_dir, out_dir, log=logs.append,
+        _dwg_to_dxf=fake_oda, _find_oda=lambda o: Path("ODA.exe"),
+    )
+    assert (out_dir / "A" / "x.pdf").exists()
+    assert (out_dir / "B" / "x.pdf").exists()
+    assert res.ok == 2 and res.failed == 0
+    assert not any("shadow" in m.lower() for m in logs)
+
+
+def test_run_batch_no_skip_overwrites_existing_pdf(tmp_path):
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    (in_dir / "a.dwg").write_text("x")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "a.pdf").write_text("OLD")  # stale, not a real PDF
+
+    def fake_oda(input_dir, temp_dir, oda_exe, **k):
+        _seed_temp_dxf(input_dir, temp_dir)
+
+    res = converter.run_batch(
+        in_dir, out_dir, skip_existing=False,
+        _dwg_to_dxf=fake_oda, _find_oda=lambda o: Path("ODA.exe"),
+    )
+    assert res.ok == 1 and res.skipped == 0
+    assert (out_dir / "a.pdf").read_bytes()[:4] == b"%PDF"  # re-rendered
+
+
+def test_run_batch_rename_is_additive_old_pdf_remains(tmp_path):
+    in_dir = tmp_path / "in"
+    (in_dir / "A").mkdir(parents=True)
+    (in_dir / "A" / "old.dwg").write_text("x")
+    out_dir = tmp_path / "out"
+
+    def fake_oda(input_dir, temp_dir, oda_exe, **k):
+        _seed_temp_dxf(input_dir, temp_dir)
+
+    converter.run_batch(
+        in_dir, out_dir, _dwg_to_dxf=fake_oda, _find_oda=lambda o: Path("ODA.exe")
+    )
+    assert (out_dir / "A" / "old.pdf").exists()
+
+    (in_dir / "A" / "old.dwg").unlink()        # user renames the source
+    (in_dir / "A" / "new.dwg").write_text("x")
+    res = converter.run_batch(
+        in_dir, out_dir, _dwg_to_dxf=fake_oda, _find_oda=lambda o: Path("ODA.exe")
+    )
+    assert (out_dir / "A" / "new.pdf").exists()   # new PDF produced
+    assert (out_dir / "A" / "old.pdf").exists()   # old PDF NOT pruned (additive)
+    assert res.ok == 1
+
+
+def test_run_batch_non_default_color_renders_valid_pdf(tmp_path):
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    (in_dir / "a.dwg").write_text("x")
+    out_dir = tmp_path / "out"
+
+    def fake_oda(input_dir, temp_dir, oda_exe, **k):
+        _seed_temp_dxf(input_dir, temp_dir)
+
+    res = converter.run_batch(
+        in_dir, out_dir, color=ColorPolicy.COLOR,
+        _dwg_to_dxf=fake_oda, _find_oda=lambda o: Path("ODA.exe"),
+    )
+    assert res.ok == 1
+    assert (out_dir / "a.pdf").read_bytes()[:4] == b"%PDF"
+
+
+def test_run_batch_missing_dxf_is_failure_not_abort(tmp_path):
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    (in_dir / "good.dwg").write_text("x")
+    (in_dir / "missing.dwg").write_text("x")
+    out_dir = tmp_path / "out"
+
+    def fake_oda(input_dir, temp_dir, oda_exe, **k):
+        make_dxf(Path(temp_dir) / "good.dxf")  # ODA never emits missing.dxf
+
+    res = converter.run_batch(
+        in_dir, out_dir, _dwg_to_dxf=fake_oda, _find_oda=lambda o: Path("ODA.exe")
+    )
+    assert res.ok == 1 and res.failed == 1
+    assert (out_dir / "good.pdf").exists()
+    assert any("missing" in rel and "not produced" in reason.lower()
+               for rel, reason in res.failures)
