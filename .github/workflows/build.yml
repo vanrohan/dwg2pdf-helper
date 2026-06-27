@@ -41,8 +41,16 @@ jobs:
           name: DWFX2PDF-exe
           path: dist/DWFX2PDF.exe
 
+      # On a tag build, also stage a version-stamped copy so a downloaded file is
+      # self-identifying, while keeping the fixed name for the latest-download URL.
+      - name: Stage versioned exe
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: Copy-Item dist/DWFX2PDF.exe "dist/DWFX2PDF-${{ github.ref_name }}.exe"
+
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/DWFX2PDF.exe
+          files: |
+            dist/DWFX2PDF.exe
+            dist/DWFX2PDF-${{ github.ref_name }}.exe

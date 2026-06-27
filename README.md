@@ -46,7 +46,9 @@ AutoCAD (DWFATTACH -> Zoom Extents -> Plot, A3 landscape). The run log is
 ## Getting the .exe
 
 Every push to `master` builds `DWFX2PDF.exe` as a GitHub Actions artifact.
-Tagging `vX.Y.Z` attaches the exe to a public release:
+Tagging `vX.Y.Z` attaches two copies to a public release: a version-stamped
+`DWFX2PDF-vX.Y.Z.exe` (so a downloaded file is self-identifying) and a fixed
+name for the always-latest URL:
 
 `https://github.com/vanrohan/dwg2pdf-helper/releases/latest/download/DWFX2PDF.exe`
 
