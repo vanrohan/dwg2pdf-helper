@@ -15,6 +15,11 @@ dist/
 dwg2pdf.log
 dwg2pdf-crash.log
 
+# Confidential sample drawings - never commit
+dwfx-samples/
+*.dwfx
+*.dwf
+
 # OS
 .DS_Store
 Thumbs.db

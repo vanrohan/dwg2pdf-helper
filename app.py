@@ -9,15 +9,15 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-import converter
-from converter import OdaNotFoundError
+import autocad_dwf
+import dwfx
 
 
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("DWG -> PDF (A3 landscape)")
-        self.geometry("720x500")
+        self.title("DWFx/DWF -> PDF")
+        self.geometry("760x540")
         self._q: queue.Queue = queue.Queue()
         self._worker: threading.Thread | None = None
         self._build()
@@ -34,20 +34,24 @@ class App(tk.Tk):
         self.out_var = tk.StringVar()
         ttk.Entry(top, textvariable=self.out_var).grid(row=1, column=1, sticky="we", padx=4)
         ttk.Button(top, text="Browse...", command=self._pick_out).grid(row=1, column=2)
+        ttk.Label(top, text="clawPDF output folder:").grid(row=2, column=0, sticky="w", pady=4)
+        self.claw_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.claw_var).grid(row=2, column=1, sticky="we", padx=4)
+        ttk.Button(top, text="Browse...", command=self._pick_claw).grid(row=2, column=2)
         top.columnconfigure(1, weight=1)
+
+        hint = ttk.Label(
+            self,
+            text=("XPS-based DWFx convert directly. Binary DWF6 files need full AutoCAD + clawPDF: "
+                  "set the clawPDF auto-save folder above (Windows only) or they are listed for manual conversion."),
+            foreground="#555", wraplength=720, justify="left",
+        )
+        hint.pack(fill="x", padx=8)
 
         opt = ttk.Frame(self)
         opt.pack(fill="x", padx=8, pady=4)
-        ttk.Label(opt, text="Color:").pack(side="left")
-        self.color_var = tk.StringVar(value=converter.DEFAULT_COLOR_LABEL)
-        ttk.Combobox(
-            opt, textvariable=self.color_var, state="readonly",
-            values=list(converter.COLOR_CHOICES), width=18,
-        ).pack(side="left", padx=6)
         self.skip_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt, text="Skip existing PDFs", variable=self.skip_var).pack(
-            side="left", padx=12
-        )
+        ttk.Checkbutton(opt, text="Skip existing PDFs", variable=self.skip_var).pack(side="left")
         self.run_btn = ttk.Button(opt, text="Run", command=self._run)
         self.run_btn.pack(side="right")
 
@@ -66,6 +70,11 @@ class App(tk.Tk):
         if d:
             self.out_var.set(d)
 
+    def _pick_claw(self) -> None:
+        d = filedialog.askdirectory(title="Select clawPDF auto-save folder")
+        if d:
+            self.claw_var.set(d)
+
     def _append(self, msg: str) -> None:
         self.log_widget.configure(state="normal")
         self.log_widget.insert("end", msg + "\n")
@@ -78,8 +87,6 @@ class App(tk.Tk):
                 kind, payload = self._q.get_nowait()
                 if kind == "log":
                     self._append(payload)
-                elif kind == "status":
-                    self.status.configure(text=payload)
                 elif kind == "done":
                     self.run_btn.configure(state="normal")
                     self.status.configure(text=payload)
@@ -98,32 +105,36 @@ class App(tk.Tk):
         if not out:
             self._append("[error] Please choose an output folder.")
             return
-        color = converter.COLOR_CHOICES[self.color_var.get()]
+        claw = self.claw_var.get().strip()
         skip = self.skip_var.get()
         self.run_btn.configure(state="disabled")
         self.status.configure(text="Working...")
         self._append(f"Input:  {inp}")
         self._append(f"Output: {out}")
         self._worker = threading.Thread(
-            target=self._work, args=(inp, out, color, skip), daemon=True
+            target=self._work, args=(inp, out, claw, skip), daemon=True
         )
         self._worker.start()
 
-    def _work(self, inp: str, out: str, color, skip: bool) -> None:
+    def _work(self, inp: str, out: str, claw: str, skip: bool) -> None:
         def log(m: str) -> None:
             self._q.put(("log", m))
 
+        autocad_batch = None
+        config = None
+        if claw and sys.platform == "win32":
+            config = autocad_dwf.AutoCadConfig(clawpdf_output_dir=Path(claw))
+            autocad_batch = autocad_dwf.convert_batch
         try:
-            res = converter.run_batch(
-                Path(inp), Path(out), color=color, skip_existing=skip, log=log
+            res = dwfx.run_batch(
+                Path(inp), Path(out), skip_existing=skip, log=log,
+                autocad_config=config, _autocad_batch=autocad_batch,
             )
             self._q.put((
                 "done",
-                f"Done. {res.ok} converted, {res.skipped} skipped, {res.failed} failed.",
+                f"Done. {res.ok} converted, {res.skipped} skipped, "
+                f"{res.failed} failed, {res.binary_pending} binary pending.",
             ))
-        except OdaNotFoundError as e:
-            self._q.put(("log", f"[error] {e}"))
-            self._q.put(("done", "ODA File Converter not found."))
         except ValueError as e:
             self._q.put(("log", f"[error] {e}"))
             self._q.put(("done", "Invalid folder selection."))
@@ -138,7 +149,7 @@ def main() -> None:
     except Exception:
         exe_dir = Path(sys.argv[0]).resolve().parent
         try:
-            (exe_dir / converter.CRASH_FILENAME).write_text(
+            (exe_dir / dwfx.CRASH_FILENAME).write_text(
                 traceback.format_exc(), encoding="utf-8"
             )
         except Exception:

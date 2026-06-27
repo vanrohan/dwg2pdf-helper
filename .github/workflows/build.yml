@@ -31,21 +31,18 @@ jobs:
 
       - name: Build one-file exe
         run: >
-          pyinstaller --onefile --windowed --name DWG2PDF
-          --collect-all ezdxf
-          --collect-all fontTools
+          pyinstaller --onefile --windowed --name DWFX2PDF
           --collect-all pymupdf
-          --collect-all PIL
           app.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DWG2PDF-exe
-          path: dist/DWG2PDF.exe
+          name: DWFX2PDF-exe
+          path: dist/DWFX2PDF.exe
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/DWG2PDF.exe
+          files: dist/DWFX2PDF.exe
