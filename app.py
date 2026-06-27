@@ -43,12 +43,20 @@ class App(tk.Tk):
         ttk.Checkbutton(
             opt, text="White background", variable=self.white_bg_var
         ).pack(side="left", padx=(12, 0))
-        self.tag_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            opt, text="Tag _assy / _weld from text", variable=self.tag_var
-        ).pack(side="left", padx=(12, 0))
         self.run_btn = ttk.Button(opt, text="Run", command=self._run)
         self.run_btn.pack(side="right")
+
+        # One checkbox per filename-tag rule, derived from dwfx.TAG_RULES so new rules
+        # appear automatically. Each maps its suffix id to an enabled flag.
+        tagbar = ttk.Frame(self)
+        tagbar.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(tagbar, text="Filename tags:").pack(side="left")
+        self.tag_vars: dict[str, tk.BooleanVar] = {}
+        for rule in dwfx.TAG_RULES:
+            suffix = rule[0]
+            var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(tagbar, text=suffix, variable=var).pack(side="left", padx=(8, 0))
+            self.tag_vars[suffix] = var
 
         self.log_widget = tk.Text(self, wrap="word", state="disabled", height=20)
         self.log_widget.pack(fill="both", expand=True, padx=8, pady=4)
@@ -97,17 +105,17 @@ class App(tk.Tk):
             return
         skip = self.skip_var.get()
         white_bg = self.white_bg_var.get()
-        tag = self.tag_var.get()
+        tags = {sfx for sfx, var in self.tag_vars.items() if var.get()}
         self.run_btn.configure(state="disabled")
         self.status.configure(text="Working...")
         self._append(f"Input:  {inp}")
         self._append(f"Output: {out}")
         self._worker = threading.Thread(
-            target=self._work, args=(inp, out, skip, white_bg, tag), daemon=True
+            target=self._work, args=(inp, out, skip, white_bg, tags), daemon=True
         )
         self._worker.start()
 
-    def _work(self, inp: str, out: str, skip: bool, white_bg: bool, tag: bool) -> None:
+    def _work(self, inp: str, out: str, skip: bool, white_bg: bool, tags: set) -> None:
         def log(m: str) -> None:
             self._q.put(("log", m))
 
@@ -115,7 +123,7 @@ class App(tk.Tk):
             res = dwfx.run_batch(
                 Path(inp), Path(out),
                 skip_existing=skip, white_background=white_bg,
-                tag_from_text=tag, log=log,
+                tags=tags, log=log,
             )
             self._q.put((
                 "done",

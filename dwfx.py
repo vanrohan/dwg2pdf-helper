@@ -20,7 +20,7 @@ import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 import fitz  # PyMuPDF
 
@@ -60,11 +60,14 @@ def classify(path: Path) -> str:
 
 
 # Filename tags derived from a drawing's text. Each rule is (suffix, terms); a sheet
-# whose annotation text contains any term gets that suffix. A sheet matching several
-# rules collects every suffix, in this order (e.g. "_assy_weld").
-SUFFIX_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+# whose annotation text contains any term gets that suffix when the tag is enabled. A
+# sheet matching several rules collects every suffix, in this order (e.g. "_assy_weld").
+# The suffix doubles as the tag's id - the GUI builds one checkbox per rule from here,
+# so adding a rule adds its checkbox automatically.
+TAG_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("_assy", ("assembly", "assy")),
     ("_weld", ("weldment",)),
+    ("_machine", ("machine",)),
 )
 
 _UNICODE_STRING_RE = re.compile(r'UnicodeString="([^"]*)"')
@@ -88,12 +91,35 @@ def annotation_text(path: Path) -> str:
     return re.sub(r"\s+", "", html.unescape("".join(runs))).lower()
 
 
-def suffix_for(text: str) -> str:
+def suffix_for(text: str, enabled: "Iterable[str] | None" = None) -> str:
     """Concatenated filename suffix(es) for already-normalized (lowercase, no
-    whitespace) annotation text - "_assy", "_weld", "_assy_weld", or "" for none."""
+    whitespace) annotation text - e.g. "_assy", "_weld", "_assy_machine", or "".
+    enabled, when given, limits which tag suffixes may apply (e.g. {"_assy"}); None
+    enables every rule."""
+    allow = None if enabled is None else set(enabled)
     return "".join(
-        suffix for suffix, terms in SUFFIX_RULES if any(t in text for t in terms)
+        suffix
+        for suffix, terms in TAG_RULES
+        if (allow is None or suffix in allow) and any(t in text for t in terms)
     )
+
+
+def has_raster_image(path: Path) -> bool:
+    """True if an XPS DWFx paints a raster image - an <ImageBrush>/ImageSource (inserted
+    photos, shaded/rendered views, scanned underlays). The reference may sit in the
+    FixedPage or in a resource-dictionary .xml the page links to, so both are scanned.
+    PyMuPDF's vector XPS->PDF device drops some of these; this gates the render-and-
+    compare check in xps_to_pdf. Thumbnail/preview PNGs that are not painted carry no
+    ImageSource and do not count. False for binary DWF or unreadable packages."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            for name in z.namelist():
+                if name.lower().endswith((".fpage", ".xml")):
+                    if "ImageSource" in z.read(name).decode("utf-8", "replace"):
+                        return True
+    except (zipfile.BadZipFile, OSError):
+        return False
+    return False
 
 
 def discover(input_dir: Path) -> list[Path]:
@@ -155,25 +181,93 @@ def _xps_with_white_background(src: Path) -> bytes:
     return buf.getvalue()
 
 
-def xps_to_pdf(src: Path, dst: Path, *, white_background: bool = True) -> int:
+def _open_xps(src: Path, white_background: bool):
+    """Open an XPS DWFx, whitening the paper background first when requested."""
+    if white_background:
+        return fitz.open(stream=_xps_with_white_background(src), filetype="xps")
+    return fitz.open(str(src), filetype="xps")
+
+
+def _convert_vector(doc) -> tuple[int, bytes]:
+    """Translate XPS to PDF as vectors - crisp, small, selectable text. PyMuPDF's
+    pdf-write device drops a few element kinds (e.g. raster ImageBrushes), so this is
+    used only for drawings with no embedded image."""
+    pdf_bytes = doc.convert_to_pdf()
+    return fitz.open("pdf", pdf_bytes).page_count, pdf_bytes
+
+
+def _convert_raster(doc, dpi: int) -> tuple[int, bytes]:
+    """Render each sheet to a raster page at dpi and assemble a PDF. Slower and not
+    text-selectable, but reproduces everything PyMuPDF can draw - including the raster
+    images the vector device drops. Streams are deflated (a 200dpi A3 sheet is ~1-2 MB,
+    lossless). Native page sizes are preserved."""
+    out = fitz.open()
+    try:
+        for page in doc:
+            pix = page.get_pixmap(dpi=dpi)
+            target = out.new_page(width=page.rect.width, height=page.rect.height)
+            target.insert_image(target.rect, pixmap=pix)
+        return out.page_count, out.tobytes(deflate=True, garbage=3)
+    finally:
+        out.close()
+
+
+def _lost_color_px(true_pix, vec_pix) -> int:
+    """Count pixels that are clearly coloured in the true render but greyscale in the
+    vector render - i.e. an image the vector device flattened to black/grey/white.
+    A size mismatch is treated as total loss (forces the raster path)."""
+    if (true_pix.width, true_pix.height) != (vec_pix.width, vec_pix.height):
+        return true_pix.width * true_pix.height
+    t, v, n = true_pix.samples, vec_pix.samples, true_pix.n
+    lost = 0
+    for i in range(0, len(t), n):
+        if max(t[i], t[i + 1], t[i + 2]) - min(t[i], t[i + 1], t[i + 2]) > 40:
+            if max(v[i], v[i + 1], v[i + 2]) - min(v[i], v[i + 1], v[i + 2]) < 25:
+                lost += 1
+    return lost
+
+
+def _vector_lost_color(doc, vec_pdf_bytes: bytes, check_dpi: int = 50) -> bool:
+    """True if the vector PDF lost colour content the page actually has - the reliable
+    signal that convert_to_pdf dropped an embedded image. Compares each page's true
+    raster render against the vector render at a coarse dpi; >0.2% of a page lost is
+    enough (benign images that the vector device handles score ~0)."""
+    vec = fitz.open("pdf", vec_pdf_bytes)
+    try:
+        for i in range(doc.page_count):
+            true_pix = doc[i].get_pixmap(dpi=check_dpi)
+            vec_pix = vec[i].get_pixmap(dpi=check_dpi)
+            if _lost_color_px(true_pix, vec_pix) > 0.002 * true_pix.width * true_pix.height:
+                return True
+    finally:
+        vec.close()
+    return False
+
+
+def xps_to_pdf(src: Path, dst: Path, *, white_background: bool = True,
+               raster_dpi: int = 200) -> int:
     """Convert an XPS-based DWFx to PDF, preserving native page sizes. Returns the
     page count. A multi-sheet DWFx becomes a multi-page PDF.
 
     white_background recolours AutoCAD's tinted paper fill (commonly #ededd6 cream)
     to white before conversion, so line work prints on white instead of a coloured
-    background. Set False to keep the drawing's original paper colour."""
-    if white_background:
-        doc = fitz.open(stream=_xps_with_white_background(src), filetype="xps")
-    else:
-        doc = fitz.open(str(src), filetype="xps")
+    background. Set False to keep the drawing's original paper colour.
+
+    Conversion is vector (crisp, small, selectable) by default. If the drawing embeds a
+    raster image and the vector device is found to have dropped it (the true render has
+    colour the vector PDF lost), the file is re-rendered page-by-page at raster_dpi so
+    the image is reproduced. Pure line drawings never pay that cost."""
+    doc = _open_xps(src, white_background)
     try:
-        pdf_bytes = doc.convert_to_pdf()
+        pages, pdf_bytes = _convert_vector(doc)
+        if has_raster_image(src) and _vector_lost_color(doc, pdf_bytes):
+            pages, pdf_bytes = _convert_raster(doc, raster_dpi)
     finally:
         doc.close()
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_bytes(pdf_bytes)
-    return fitz.open("pdf", pdf_bytes).page_count
+    return pages
 
 
 def _validate_dirs(input_dir: Path, output_dir: Path) -> None:
@@ -191,7 +285,7 @@ def run_batch(
     *,
     skip_existing: bool = True,
     white_background: bool = True,
-    tag_from_text: bool = True,
+    tags: "Iterable[str] | None" = None,
     log: Log = lambda m: None,
     autocad_config: "object | None" = None,
     _convert_xps: Callable[..., int] = xps_to_pdf,
@@ -199,10 +293,12 @@ def run_batch(
 ) -> BatchResult:
     """Convert every .dwfx/.dwf under input_dir into output_dir, mirroring the tree.
 
-    XPS DWFx are converted in-process via PyMuPDF. Binary DWF6 files are handed to
-    the AutoCAD driver when one is available (Windows + AutoCAD + clawPDF); when it
-    is not, they are listed in a report file and counted as binary_pending rather
-    than failed, so the user knows exactly which files still need the AutoCAD route.
+    XPS DWFx are converted in-process via PyMuPDF (image-bearing sheets are rendered;
+    if a sheet cannot be converted the file is counted as failed). tags limits which
+    filename tags may apply (suffix ids from TAG_RULES, e.g. {"_assy"}); None enables
+    all, an empty set disables tagging. Binary DWF6 files are handed to the AutoCAD
+    driver when one is available (Windows + AutoCAD + clawPDF); when it is not, they
+    are listed in a report file and counted as binary_pending rather than failed.
     """
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -231,8 +327,8 @@ def run_batch(
             rel = str(src.relative_to(input_dir))
             kind = classify(src)
             target = plan_output_path(src, input_dir, output_dir)
-            if kind == "xps" and tag_from_text:
-                suffix = suffix_for(annotation_text(src))
+            if kind == "xps":
+                suffix = suffix_for(annotation_text(src), enabled=tags)
                 if suffix:
                     target = target.with_name(f"{target.stem}{suffix}{target.suffix}")
             if skip_existing and target.exists():

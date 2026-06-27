@@ -202,8 +202,25 @@ def test_suffix_for_keywords():
     assert dwfx.suffix_for("mainassembly") == "_assy"
     assert dwfx.suffix_for("weldassyhere") == "_assy"      # bare "assy"
     assert dwfx.suffix_for("asteelweldment") == "_weld"
-    assert dwfx.suffix_for("weldmentassembly") == "_assy_weld"  # both, ordered
+    assert dwfx.suffix_for("amachinedpart") == "_machine"  # "machine" inside "machined"
+    assert dwfx.suffix_for("weldmentassembly") == "_assy_weld"  # both, rule order
+    assert dwfx.suffix_for("assemblymachinework") == "_assy_machine"
     assert dwfx.suffix_for("plaincoverplate") == ""
+
+
+def test_suffix_for_machine_does_not_match_machining():
+    # The standard AusRoad title block has a "MACHINING" tolerance row; it must NOT
+    # tag every drawing. "machine" is not a substring of "machining".
+    assert dwfx.suffix_for("machiningtolerances") == ""
+
+
+def test_suffix_for_respects_enabled_subset():
+    # Per-tag toggles: only enabled suffixes may apply.
+    text = "weldmentassembly"  # would be _assy_weld with all rules
+    assert dwfx.suffix_for(text, enabled={"_assy"}) == "_assy"
+    assert dwfx.suffix_for(text, enabled={"_weld"}) == "_weld"
+    assert dwfx.suffix_for(text, enabled=set()) == ""        # all tags off
+    assert dwfx.suffix_for(text, enabled=None) == "_assy_weld"  # None = all on
 
 
 def test_run_batch_tags_assembly_filename(tmp_path):
@@ -245,14 +262,25 @@ def test_run_batch_no_tag_when_no_keyword(tmp_path):
     assert not (out_dir / "plate_assy.pdf").exists()
 
 
-def test_run_batch_tag_from_text_off(tmp_path):
+def test_run_batch_tags_all_off(tmp_path):
     in_dir = tmp_path / "in"
     in_dir.mkdir()
     make_min_xps(in_dir / "part.dwfx", text="MAIN ASSEMBLY")
     out_dir = tmp_path / "out"
-    dwfx.run_batch(in_dir, out_dir, tag_from_text=False, _convert_xps=_fake_convert)
+    dwfx.run_batch(in_dir, out_dir, tags=set(), _convert_xps=_fake_convert)
     assert (out_dir / "part.pdf").exists()
     assert not (out_dir / "part_assy.pdf").exists()
+
+
+def test_run_batch_tags_only_enabled_subset(tmp_path):
+    # Drawing text has both assembly and weldment, but only the _weld tag is enabled.
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    make_min_xps(in_dir / "rig.dwfx", text="WELDMENT ASSEMBLY")
+    out_dir = tmp_path / "out"
+    dwfx.run_batch(in_dir, out_dir, tags={"_weld"}, _convert_xps=_fake_convert)
+    assert (out_dir / "rig_weld.pdf").exists()
+    assert not (out_dir / "rig_assy_weld.pdf").exists()
 
 
 def test_run_batch_skip_existing_uses_tagged_name(tmp_path):
@@ -328,6 +356,257 @@ def test_run_batch_enabling_tag_leaves_old_untagged_pdf(tmp_path):
     dwfx.run_batch(in_dir, out_dir, _convert_xps=_fake_convert)
     assert (out_dir / "part.pdf").exists()       # old one left untouched
     assert (out_dir / "part_assy.pdf").exists()  # new tagged one written
+
+
+# --- embedded raster images ---
+
+def test_has_raster_image_detection(tmp_path):
+    assert dwfx.has_raster_image(make_min_xps(tmp_path / "img.dwfx", image=True)) is True
+    assert dwfx.has_raster_image(make_min_xps(tmp_path / "plain.dwfx")) is False
+    assert dwfx.has_raster_image(make_fake_binary_dwf(tmp_path / "b.dwfx")) is False
+
+
+def test_has_raster_image_detects_imagesource_in_resource_xml(tmp_path):
+    # Real DWFx (e.g. 55209C) reference the image from a resource-dictionary .xml the
+    # page links to, NOT the .fpage itself. Detection must scan those parts too.
+    p = tmp_path / "res.dwfx"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr(
+            "Documents/1/Pages/1.fpage",
+            '<FixedPage xmlns="x"><Canvas><Canvas.Resources>'
+            '<ResourceDictionary Source="res.xml"/></Canvas.Resources></Canvas></FixedPage>',
+        )
+        z.writestr(
+            "Documents/1/Pages/res.xml",
+            '<ResourceDictionary xmlns="x"><ImageBrush ImageSource="/img.png"/></ResourceDictionary>',
+        )
+    assert dwfx.has_raster_image(p) is True
+
+
+def test_lost_color_px_detects_flattened_image():
+    def solid(rgb):
+        pm = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 10, 10), False)
+        pm.set_rect(pm.irect, rgb)
+        return pm
+    red, black, white = solid((255, 0, 0)), solid((0, 0, 0)), solid((255, 255, 255))
+    assert dwfx._lost_color_px(red, black) == 100   # colour -> black: all lost
+    assert dwfx._lost_color_px(red, white) == 100   # colour -> white also counts
+    assert dwfx._lost_color_px(red, red) == 0       # colour preserved
+    assert dwfx._lost_color_px(white, black) == 0   # nothing colourful to lose
+    small = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 5, 5), False)
+    assert dwfx._lost_color_px(red, small) == 100   # size mismatch -> total loss
+
+
+def test_vector_lost_color_true_when_vector_dropped_image(tmp_path):
+    # Simulate the real failure in CI: true render (image doc) has the red square,
+    # vector render (built from a no-image doc) does not -> colour lost -> raster.
+    img_doc = dwfx._open_xps(make_min_xps(tmp_path / "img.dwfx", image=True), False)
+    plain_doc = dwfx._open_xps(make_min_xps(tmp_path / "plain.dwfx"), False)
+    try:
+        vec_without_image = plain_doc.convert_to_pdf()
+        assert dwfx._vector_lost_color(img_doc, vec_without_image) is True
+    finally:
+        img_doc.close()
+        plain_doc.close()
+
+
+def test_vector_lost_color_false_when_image_preserved(tmp_path):
+    # Vector PDF built from the SAME image doc keeps the red -> nothing lost -> vector.
+    # Also pins that edge antialiasing differences stay under the 0.2% threshold.
+    img = make_min_xps(tmp_path / "img.dwfx", image=True)
+    doc, other = dwfx._open_xps(img, False), dwfx._open_xps(img, False)
+    try:
+        assert dwfx._vector_lost_color(doc, other.convert_to_pdf()) is False
+    finally:
+        doc.close()
+        other.close()
+
+
+def test_vector_lost_color_true_when_only_one_page_dropped(tmp_path):
+    # 3-sheet set, image only on the last sheet; the per-page check must still fire.
+    img_doc = dwfx._open_xps(
+        make_multi_xps(tmp_path / "set.dwfx", pages=3, image_on_last=True), False
+    )
+    plain_doc = dwfx._open_xps(make_multi_xps(tmp_path / "plain.dwfx", pages=3), False)
+    try:
+        assert dwfx._vector_lost_color(img_doc, plain_doc.convert_to_pdf()) is True
+    finally:
+        img_doc.close()
+        plain_doc.close()
+
+
+def test_xps_to_pdf_uses_raster_branch_when_color_lost(tmp_path, monkeypatch):
+    # Force the routing decision so the raster re-render branch is exercised in CI.
+    monkeypatch.setattr(dwfx, "_vector_lost_color", lambda *a, **k: True)
+    src = make_min_xps(tmp_path / "img.dwfx", image=True)
+    out = tmp_path / "img.pdf"
+    dwfx.xps_to_pdf(src, out)
+    d = fitz.open(out)
+    assert d.page_count == 1
+    assert d[0].get_text("text").strip() == ""  # raster page -> no selectable text
+    r, g, b = d[0].get_pixmap(dpi=72).pixel(int(250 * 0.75), int(600 * 0.75))
+    assert r > 200 and g < 80 and b < 80
+
+
+def test_has_raster_image_false_for_unpainted_png(tmp_path):
+    # A thumbnail/preview PNG with no ImageSource reference must not trigger raster.
+    p = make_min_xps(tmp_path / "thumb.dwfx")
+    with zipfile.ZipFile(p, "a") as z:
+        z.writestr("Documents/1/thumbnail.png", b"\x89PNG\r\n\x1a\n")
+    assert dwfx.has_raster_image(p) is False
+
+
+def test_convert_raster_renders_image_and_preserves_size(tmp_path):
+    # Directly exercise the raster builder: image reproduced, landscape size kept.
+    src = make_min_xps(tmp_path / "img.dwfx", image=True, width=1000, height=800)
+    doc = dwfx._open_xps(src, white_background=True)
+    try:
+        pages, pdf = dwfx._convert_raster(doc, dpi=120)
+    finally:
+        doc.close()
+    assert pages == 1
+    d = fitz.open("pdf", pdf)
+    assert d[0].rect.width > d[0].rect.height
+    pix = d[0].get_pixmap(dpi=72)
+    r, g, b = pix.pixel(int(250 * 0.75), int(600 * 0.75))
+    assert r > 200 and g < 80 and b < 80
+
+
+def test_xps_to_pdf_renders_embedded_image(tmp_path):
+    # End-to-end: an image-bearing drawing reproduces its red square (here the vector
+    # device handles the synthetic image, so it stays vector - the image must survive).
+    src = make_min_xps(tmp_path / "img.dwfx", image=True)
+    out = tmp_path / "img.pdf"
+    dwfx.xps_to_pdf(src, out)
+    pix = fitz.open(out)[0].get_pixmap(dpi=72)  # 72dpi => 1px per XPS-point (xps*0.75)
+    r, g, b = pix.pixel(int(250 * 0.75), int(600 * 0.75))  # image centre
+    assert r > 200 and g < 80 and b < 80  # red image rendered, not blank
+
+
+def test_run_batch_converts_image_file(tmp_path):
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    make_min_xps(in_dir / "photo.dwfx", image=True)
+    out_dir = tmp_path / "out"
+    res = dwfx.run_batch(in_dir, out_dir)  # real converter -> raster path
+    assert res.ok == 1 and res.failed == 0
+    assert (out_dir / "photo.pdf").read_bytes()[:4] == b"%PDF"
+
+
+def test_run_batch_marks_failed_when_conversion_raises(tmp_path):
+    # "Render the image if possible, else mark failed": a converter that cannot
+    # produce a PDF leaves the file counted as failed, batch keeps going.
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    make_min_xps(in_dir / "bad.dwfx", image=True)
+    make_min_xps(in_dir / "good.dwfx", text="plate")
+    out_dir = tmp_path / "out"
+
+    def converter(src, target, *, white_background=True):
+        if "bad" in str(src):
+            raise RuntimeError("cannot render image")
+        return _fake_convert(src, target, white_background=white_background)
+
+    res = dwfx.run_batch(in_dir, out_dir, _convert_xps=converter)
+    assert res.ok == 1 and res.failed == 1
+    assert (out_dir / "good.pdf").exists()
+    assert any("bad.dwfx" in rel for rel, _ in res.failures)
+
+
+def _image_centre_rgb(pdf_path):
+    pix = fitz.open(pdf_path)[0].get_pixmap(dpi=72)  # 72dpi => xps*0.75 px
+    return pix.pixel(int(250 * 0.75), int(600 * 0.75))
+
+
+def test_xps_to_pdf_image_with_white_background(tmp_path):
+    # Raster route must render the WHITENED doc: white corner AND red image both hold.
+    src = make_min_xps(tmp_path / "img.dwfx", image=True, background="#ededd6")
+    out = tmp_path / "img.pdf"
+    dwfx.xps_to_pdf(src, out, white_background=True)
+    assert _corner_rgb(out) == (255, 255, 255)
+    r, g, b = _image_centre_rgb(out)
+    assert r > 200 and g < 80 and b < 80
+
+
+def test_xps_to_pdf_image_keeps_cream_when_white_off(tmp_path):
+    src = make_min_xps(tmp_path / "img.dwfx", image=True, background="#ededd6")
+    out = tmp_path / "img.pdf"
+    dwfx.xps_to_pdf(src, out, white_background=False)
+    assert _corner_rgb(out) == (237, 237, 214)  # cream kept
+    assert _image_centre_rgb(out)[0] > 200      # image still rendered
+
+
+@pytest.mark.skipif(
+    not (SAMPLES / "55209C.dwg.dwfx").exists(),
+    reason="confidential real image sample not present (gitignored)",
+)
+def test_real_image_drawing_routes_to_raster_and_renders(tmp_path):
+    # Real drawing whose embedded photo the vector device black-boxes. The render-and-
+    # compare routing must pick raster so the colour photo survives.
+    out = tmp_path / "55209C.pdf"
+    dwfx.xps_to_pdf(SAMPLES / "55209C.dwg.dwfx", out)
+    pix = fitz.open(out)[0].get_pixmap(dpi=72)
+    s, n = pix.samples, pix.n
+    colourful = sum(
+        1 for i in range(0, len(s), n)
+        if max(s[i], s[i + 1], s[i + 2]) - min(s[i], s[i + 1], s[i + 2]) > 40
+    )
+    assert colourful > 5000  # the photo rendered (vector path would be ~0 here)
+
+
+@pytest.mark.skipif(
+    not (SAMPLES / "46313B.dwg.dwfx").exists(),
+    reason="confidential real sample not present (gitignored)",
+)
+def test_real_lineart_with_benign_image_stays_vector(tmp_path):
+    # This drawing carries an ImageSource the vector device handles fine; it must NOT be
+    # downgraded to raster. Selectable text + a tiny file prove the vector path was kept.
+    out = tmp_path / "46313B.pdf"
+    dwfx.xps_to_pdf(SAMPLES / "46313B.dwg.dwfx", out)
+    assert fitz.open(out)[0].get_text("text").strip() != ""  # raster pages have no text
+    assert out.stat().st_size < 1_000_000                    # vector PDF is ~0.1 MB
+
+
+def test_run_batch_image_and_assembly_tag_compose(tmp_path):
+    # Assembly drawing that also embeds an image: tagged name AND image rendered.
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    make_min_xps(in_dir / "rig.dwfx", text="MAIN ASSEMBLY", image=True)
+    out_dir = tmp_path / "out"
+    res = dwfx.run_batch(in_dir, out_dir)  # real converter
+    assert res.ok == 1
+    tagged = out_dir / "rig_assy.pdf"
+    assert tagged.exists()
+    assert _image_centre_rgb(tagged)[0] > 200
+
+
+def test_run_batch_multisheet_image_on_one_sheet_keeps_all_pages(tmp_path):
+    # Multi-sheet image file: every page is kept and the image on the last sheet
+    # renders. (The synthetic image survives the vector device, so this exercises the
+    # vector path; the raster routing is covered by the _vector_lost_color tests.)
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    make_multi_xps(in_dir / "set.dwfx", pages=3, image_on_last=True)
+    out_dir = tmp_path / "out"
+    res = dwfx.run_batch(in_dir, out_dir)
+    assert res.ok == 1
+    doc = fitz.open(out_dir / "set.pdf")
+    assert doc.page_count == 3
+    last = doc[2].get_pixmap(dpi=72)
+    assert last.pixel(int(250 * 0.75), int(600 * 0.75))[0] > 200  # image on last sheet
+
+
+def test_run_batch_machine_tag_end_to_end(tmp_path):
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    make_min_xps(in_dir / "part.dwfx", text="MACHINED bracket")
+    out_dir = tmp_path / "out"
+    dwfx.run_batch(in_dir, out_dir, _convert_xps=_fake_convert)
+    assert (out_dir / "part_machine.pdf").exists()
+
+
+def test_suffix_for_unknown_tag_id_is_harmless():
+    assert dwfx.suffix_for("mainassembly", enabled={"_bogus"}) == ""
 
 
 # --- run_batch: XPS path (fully testable on any OS) ---
