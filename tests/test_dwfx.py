@@ -1,3 +1,4 @@
+import zipfile
 from pathlib import Path
 
 import fitz
@@ -5,7 +6,7 @@ import pytest
 
 import autocad_dwf
 import dwfx
-from conftest import make_fake_binary_dwf, make_min_xps
+from conftest import make_fake_binary_dwf, make_min_xps, make_multi_xps
 
 
 # --- classify ---
@@ -157,3 +158,76 @@ def test_convert_batch_noop_off_windows(tmp_path):
     logs = []
     res = autocad_dwf.convert_batch(jobs, config=autocad_dwf.AutoCadConfig(), log=logs.append)
     assert res == {tmp_path / "a.dwfx": False}
+
+
+# --- additional real-world scenarios (from test review) ---
+
+def test_run_batch_mixed_tree_one_binary_fails_does_not_abort(tmp_path):
+    in_dir = tmp_path / "in"
+    (in_dir / "xps").mkdir(parents=True)
+    (in_dir / "bin").mkdir(parents=True)
+    make_min_xps(in_dir / "xps" / "draw.dwfx")
+    make_fake_binary_dwf(in_dir / "bin" / "good.dwfx")
+    make_fake_binary_dwf(in_dir / "bin" / "bad.dwfx")
+    out_dir = tmp_path / "out"
+
+    def fake_autocad(jobs, *, config, log):
+        out = {}
+        for src, target in jobs:
+            if src.name == "good.dwfx":
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+                Path(target).write_bytes(b"%PDF-1.7\n")
+                out[src] = True
+            else:
+                out[src] = False  # AutoCAD failed on this one
+        return out
+
+    res = dwfx.run_batch(in_dir, out_dir, _autocad_batch=fake_autocad)
+    assert res.ok == 2  # xps + good binary
+    assert res.failed == 1  # bad binary; batch kept going
+    assert (out_dir / "xps" / "draw.pdf").exists()
+    assert (out_dir / "bin" / "good.pdf").exists()
+    assert any("bad.dwfx" in rel for rel, _ in res.failures)
+
+
+def test_run_batch_rejects_output_equals_input(tmp_path):
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    with pytest.raises(ValueError):
+        dwfx.run_batch(in_dir, in_dir)
+
+
+def test_xps_to_pdf_multi_sheet_makes_multipage_pdf(tmp_path):
+    src = make_multi_xps(tmp_path / "multi.dwfx", pages=3)
+    out = tmp_path / "multi.pdf"
+    pages = dwfx.xps_to_pdf(src, out)
+    assert pages == 3
+    assert fitz.open(out).page_count == 3
+
+
+def test_run_batch_overwrites_when_skip_existing_false(tmp_path):
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    make_min_xps(in_dir / "a.dwfx")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "a.pdf").write_text("OLD")
+    res = dwfx.run_batch(in_dir, out_dir, skip_existing=False)
+    assert res.ok == 1 and res.skipped == 0
+    assert (out_dir / "a.pdf").read_bytes()[:4] == b"%PDF"
+
+
+def test_run_batch_empty_input(tmp_path):
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    out_dir = tmp_path / "out"
+    res = dwfx.run_batch(in_dir, out_dir)
+    assert res.ok == 0 and res.failed == 0 and res.binary_pending == 0
+    assert "No .dwfx" in (out_dir / dwfx.LOG_FILENAME).read_text()
+
+
+def test_classify_zip_without_markers_is_unknown(tmp_path):
+    p = tmp_path / "other.dwfx"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("hello.txt", "no fpage, fdseq or w2d here")
+    assert dwfx.classify(p) == "unknown"
