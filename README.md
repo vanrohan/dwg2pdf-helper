@@ -10,6 +10,18 @@ as plotted; file names are kept.
 2. Pick the **input folder** and an **output folder** (not the input folder or inside it).
 3. Click **Run**.
 
+**White background** (on by default) drops the tinted "paper" colour AutoCAD
+writes into many drawings (e.g. pale cream `#ededd6`) so line work prints on
+white. Untick it to keep the drawing's original background colour.
+
+**Tag _assy / _weld from text** (on by default) scans each sheet's text and
+appends a suffix to the PDF name: `_assy` if it contains "assembly" or "assy",
+`_weld` if it contains "weldment" (case-insensitive). A sheet with both gets
+`_assy_weld`. Matching ignores spacing, so letter-spaced titles still match;
+the trade-off is a rare false hit where unrelated words run together (e.g. a
+"class y" note). Untick to keep plain names. Only XPS DWFx are scanned - binary
+DWF6 files (manual conversion) are never tagged.
+
 XPS-based DWFx convert automatically. Older **binary DWF6** files (e.g. from
 Inventor) have no free converter and are listed in
 `binary-dwf-needs-autocad.txt` in the output folder for manual conversion in

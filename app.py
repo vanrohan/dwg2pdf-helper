@@ -39,6 +39,14 @@ class App(tk.Tk):
         opt.pack(fill="x", padx=8, pady=4)
         self.skip_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt, text="Skip existing PDFs", variable=self.skip_var).pack(side="left")
+        self.white_bg_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opt, text="White background", variable=self.white_bg_var
+        ).pack(side="left", padx=(12, 0))
+        self.tag_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            opt, text="Tag _assy / _weld from text", variable=self.tag_var
+        ).pack(side="left", padx=(12, 0))
         self.run_btn = ttk.Button(opt, text="Run", command=self._run)
         self.run_btn.pack(side="right")
 
@@ -88,21 +96,27 @@ class App(tk.Tk):
             self._append("[error] Please choose an output folder.")
             return
         skip = self.skip_var.get()
+        white_bg = self.white_bg_var.get()
+        tag = self.tag_var.get()
         self.run_btn.configure(state="disabled")
         self.status.configure(text="Working...")
         self._append(f"Input:  {inp}")
         self._append(f"Output: {out}")
         self._worker = threading.Thread(
-            target=self._work, args=(inp, out, skip), daemon=True
+            target=self._work, args=(inp, out, skip, white_bg, tag), daemon=True
         )
         self._worker.start()
 
-    def _work(self, inp: str, out: str, skip: bool) -> None:
+    def _work(self, inp: str, out: str, skip: bool, white_bg: bool, tag: bool) -> None:
         def log(m: str) -> None:
             self._q.put(("log", m))
 
         try:
-            res = dwfx.run_batch(Path(inp), Path(out), skip_existing=skip, log=log)
+            res = dwfx.run_batch(
+                Path(inp), Path(out),
+                skip_existing=skip, white_background=white_bg,
+                tag_from_text=tag, log=log,
+            )
             self._q.put((
                 "done",
                 f"Done. {res.ok} converted, {res.skipped} skipped, "

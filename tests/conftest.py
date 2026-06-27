@@ -1,3 +1,4 @@
+import html
 import zipfile
 from pathlib import Path
 
@@ -5,11 +6,33 @@ import ezdxf
 import pytest
 
 
-def make_min_xps(path: Path, *, width: float = 1122.56, height: float = 793.76) -> Path:
+def _glyph_runs(text: str) -> str:
+    """Mimic AutoCAD ePlot: one positioned <Glyphs> run per character, so words
+    only reappear when the per-character UnicodeString runs are concatenated."""
+    return "".join(
+        f'<Glyphs UnicodeString="{html.escape(c, quote=True)}"/>' for c in text
+    )
+
+
+def make_min_xps(path: Path, *, width: float = 1122.56, height: float = 793.76,
+                 background: str | None = None, text: str | None = None) -> Path:
     """Build a minimal valid XPS package (the format inside an XPS-based DWFx),
     with one FixedPage containing a filled rectangle. PyMuPDF opens this as 'xps'.
-    Default size is A3-landscape in XPS units (1/96 inch)."""
+    Default size is A3-landscape in XPS units (1/96 inch).
+
+    background, when given (e.g. "#ededd6"), prepends a full-page paper rectangle
+    starting at the origin - mirroring the non-white 'paper' fill AutoCAD writes as
+    the first Path of every real sheet.
+
+    text, when given, adds it as per-character <Glyphs> runs (like AutoCAD), so
+    annotation-text extraction can be exercised."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    bg = (
+        f'<Path Fill="{background}" Data="M 0, 0 L {width},0 {width},{height} 0,{height} z"/>'
+        if background
+        else ""
+    )
+    glyphs = _glyph_runs(text) if text else ""
     parts = {
         "[Content_Types].xml": (
             '<?xml version="1.0" encoding="UTF-8"?>'
@@ -42,7 +65,9 @@ def make_min_xps(path: Path, *, width: float = 1122.56, height: float = 793.76) 
             '<?xml version="1.0" encoding="UTF-8"?>'
             f'<FixedPage Width="{width}" Height="{height}" '
             'xmlns="http://schemas.microsoft.com/xps/2005/06" xml:lang="en-US">'
+            f'{bg}'
             '<Path Fill="#FF000000" Data="M 100,100 L 500,100 500,400 100,400 Z"/>'
+            f'{glyphs}'
             "</FixedPage>"
         ),
     }
@@ -53,9 +78,19 @@ def make_min_xps(path: Path, *, width: float = 1122.56, height: float = 793.76) 
 
 
 def make_multi_xps(path: Path, *, pages: int = 2,
-                   width: float = 1122.56, height: float = 793.76) -> Path:
-    """Like make_min_xps but with N FixedPages -> an N-page PDF after conversion."""
+                   width: float = 1122.56, height: float = 793.76,
+                   background: str | None = None,
+                   text_on_last: str | None = None) -> Path:
+    """Like make_min_xps but with N FixedPages -> an N-page PDF after conversion.
+    background, when given, prepends a full-page paper rectangle to every sheet.
+    text_on_last, when given, puts that text on the LAST sheet only - so tests can
+    prove keyword detection scans every sheet, not just the first."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    bg = (
+        f'<Path Fill="{background}" Data="M 0, 0 L {width},0 {width},{height} 0,{height} z"/>'
+        if background
+        else ""
+    )
     page_refs = "".join(
         f'<PageContent Source="Pages/{i}.fpage"/>' for i in range(1, pages + 1)
     )
@@ -89,11 +124,14 @@ def make_multi_xps(path: Path, *, pages: int = 2,
         ),
     }
     for i in range(1, pages + 1):
+        glyphs = _glyph_runs(text_on_last) if (text_on_last and i == pages) else ""
         parts[f"Documents/1/Pages/{i}.fpage"] = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             f'<FixedPage Width="{width}" Height="{height}" '
             'xmlns="http://schemas.microsoft.com/xps/2005/06" xml:lang="en-US">'
+            f'{bg}'
             '<Path Fill="#FF000000" Data="M 100,100 L 500,100 500,400 100,400 Z"/>'
+            f'{glyphs}'
             "</FixedPage>"
         )
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
